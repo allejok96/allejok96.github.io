@@ -1,0 +1,646 @@
+<!DOCTYPE HTML>
+<html>
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Golvvärmekalkylator</title>
+  <script>
+
+// https://raychemgolvvarme.se/produkter/golvvarmesystem/golvvarmekablar/t2black
+var STD_CABLE_EFFECT = 12;
+var MIN_EFFECT = 100;  
+var MAX_COMBUSTABLE = 120;
+var MAX_EFFECT = 150;
+
+var MIN_WALL_DISTANCE = 5;
+var MAX_WALL_DISTANCE = 8;
+var BEND_TOLERANCE = 0.5;  // feltolerans vid varje böj 
+
+// Kabellängder
+var CABLE_AUTO = 0;
+var CABLE_CUSTOM = 1;
+var CABLE_LIST = [14.5, 20, 26.5, 35.5, 46, 55, 73, 98];
+
+function $(id) {
+  return document.getElementById(id);
+}
+
+function prepare() {
+  $('cable').innerHTML = '<option value="' + CABLE_AUTO + '">Auto</option>'
+  $('cable').innerHTML += '<option value="' + CABLE_CUSTOM + '">Anpassad</option>'
+  
+  var c;
+  for (c of CABLE_LIST) {
+      $('cable').innerHTML += '<option value="' + c + '">' + c + ' m</option>'
+  }
+  
+  var e;
+  for (e of document.getElementsByTagName('input')) {
+      e.oninput = function() {calculate()};
+  }
+}
+
+function show(id, state = null) {
+  if (state == null) {
+    state = $(id).style.display == 'none';
+  }
+  $(id).style.display = state ? 'inline' : 'none';
+}
+
+function showResult(state = null) {
+  show('measuresBtn', state);
+  show('overviewContainer', state);
+  // If state is true these should be hidden
+  show('measuresContainer', state ? false : state);
+  show('overviewBtn', state ? false : state);
+}
+
+function rotate() {
+  width = $('width').value;
+  length = $('length').value;
+  $('width').value = length;
+  $('length').value = width;
+  calculate();
+}
+
+function reset() {
+  $('width').value = '';
+  $('length').value = '';
+  $('cable').value = CABLE_AUTO;
+  $('advancedArea').value = '';
+  show('cableContainer', false);
+  showResult(false);
+}
+
+function calculate() {
+  showResult(false);
+  
+  var valid = false;
+  
+  // Kabelns längd och effekt
+  var effect = STD_CABLE_EFFECT;
+  var cable = Number($('cable').value);
+  var combustable = $('combustable').checked;
+  
+  // Visa boxen för inmatning ifall vi valt anpassad
+  if (cable == CABLE_CUSTOM) {
+    show('cableContainer', true);
+    cable = Number($('customCable').value);
+    effect = Number($('effect').value);
+    if (!cable || !effect) { return; }
+  } else {
+    show('cableContainer', false);  
+  }
+
+  // Rumsmått
+  var width = Number($('width').value);
+  var length = Number($('length').value);
+  if (!width || !length) { return; }
+  
+  // Ruta med extra mått
+  $('advancedArea').style.color = 'black'
+  var advanced = $('advancedArea').value;
+  var extraArea = 0;
+  var nonUsableArea = 0;
+  var line;
+  for (line of advanced.split('\n')) {
+    line = line.trim();
+    if (line != '') {
+      var result = line.match(/^(-?) ?([0-9]+)[* ]+([0-9]+)$/);
+      if (result) {
+        if (result[1] == '-') {
+          nonUsableArea += result[2] * result[3]
+        } else {
+          extraArea +=  result[2] * result[3]
+        }
+      } else {
+        // Ogiltig inmatning
+        $('advancedArea').style.color = 'red'
+        return;
+      }
+    }
+  }
+
+  // Skriv ut teoretisk area
+  $('totalArea').innerHTML = ((length * width + extraArea) / 10000).toFixed(1) + ' m²';
+  $('usableArea').innerHTML = ((length * width + extraArea - nonUsableArea) / 10000).toFixed(1) + ' m² fritt';
+
+  // De faktiska mått vi kommer arbeta inom
+  var workLength = length - MIN_WALL_DISTANCE * 2;
+  var workWidth = width - MIN_WALL_DISTANCE * 2;
+  // Kontrollera att total yta är ok
+  // OBS area stämmer ej när man lägger till extra ytor, pga väggmarginaler där...
+  if (workLength * workWidth + extraArea - nonUsableArea <= 0) { return; }
+  
+  // Fördela den extra ytan jämnt över alla slingor genom att ändra rummets längd något
+  // detta påverkar kabelns totala längd, men inte antal slingor och deras mått
+  workLength = workLength + ((extraArea - nonUsableArea) / workWidth);
+  
+  
+  // Om vi valt automatisk längd, gå igenom alla kablar
+  for (cable of (cable == CABLE_AUTO ? CABLE_LIST : [cable])) {
+  
+    // Konvertera kabel till cm och dra bort det extra avstånd som krävs för alla böjar
+    // dvs skillnaden mellan en halvcirkel och en rak linje
+    var usableCable = (cable * 100 - (Math.PI / 2 - 1) * workWidth);
+  
+    // Se hur många slingor vi kan göra som är lika långa som rummet
+    var optimalLineCount = usableCable / workLength;
+    // Verkligt antal slingor, avrunda uppåt (så sista blir för kort)
+    var lineCount = Math.ceil(optimalLineCount);
+
+    // c/c avstånd
+    // Eftersom de yttersta slingorna ligger på linjen drar vi bort en ur beräkningen
+    var gapWidth = workWidth / (lineCount - 1) ;
+    if (gapWidth < 5 || lineCount < 2) { continue; }
+
+    // Watt per kvadratmeter (det stämmer men jag kan inte förklara varför)
+    var outputEffect = effect / (gapWidth / 100);
+    
+    // Sluta om det är för varmt
+    // (om det är första/enda alternativet fortsätter vi ändå)
+    if (outputEffect > (combustable ? MAX_COMBUSTABLE : MAX_EFFECT) &&
+        cable != CABLE_LIST[0]) { break; }
+
+    // Bit som fattas
+    var cableReminder = (lineCount - optimalLineCount) * workLength;
+    // Dela upp denna bit på alla de övriga slingorna
+    // två bitar för varje slinga, men inte början och inte slutet för de kan vi inte påverka
+    var optimalWallDistance = cableReminder / (lineCount * 2 - 2) + MIN_WALL_DISTANCE;
+    // Avrunda nedåt så inte kabeln blir för lång
+    // sätt dessutom en övre gräns för hur långt från väggen vi kan vara
+    var wallDistance = Math.min(Math.floor(optimalWallDistance), MAX_WALL_DISTANCE);
+
+    // Gör om ekvationen, med de nya måtten
+    workLength = (length - wallDistance * 2) + ((extraArea - nonUsableArea) / workWidth);
+    optimalLineCount = usableCable / workLength;
+    cableReminder = (lineCount - optimalLineCount) * workLength;
+
+    // Skriv ut resultatet
+    valid = true;
+
+    $('selectedCable').innerHTML = cable + ' m';
+    $('lineCount').innerHTML = lineCount + ' slingor';
+    $('wallDistance').innerHTML = wallDistance + ' cm';
+    $('gapWidth').innerHTML = gapWidth.toFixed(1);
+    $('cableReminder').innerHTML = cableReminder.toFixed(0) + ' cm';
+    
+    // Effekt och varning
+    outputEffect = outputEffect.toFixed(0)
+    $('outputEffect').innerHTML = outputEffect + ' W/m²';
+    if (outputEffect < MIN_EFFECT) {
+      $('effectWarning').innerHTML = 'För låg effekt'
+    } else if (combustable && outputEffect > MAX_COMBUSTABLE) {
+      $('effectWarning').innerHTML = 'För hög effekt!'
+    } else if (outputEffect > MAX_EFFECT) {
+      $('effectWarning').innerHTML = 'För hög effekt!'
+    } else {
+      $('effectWarning').innerHTML = ''
+    }
+    
+    // Alla avstånd     
+    var measures = '';
+    for (var i = 0; i < lineCount; i++) {
+      measures += '<p>' + (Math.round((MIN_WALL_DISTANCE + gapWidth * i) * 2) / 2).toFixed(1) + '</p>';
+    }
+    
+    $('measures').innerHTML = measures;
+    
+    // Sluta om det är tillräckligt varmt
+    if (outputEffect > MIN_EFFECT) { break; }
+  }
+
+  if (valid) { showResult(true); }
+}
+
+  </script>
+</head>
+<body style="font-family:sans;font-size:12px" onload="prepare()">
+  
+  <h1>Golvvärmekalkylator</h1>
+  
+  <h3>Kabel <span style="color:darkcyan" onclick="show('cableHelp')">[?]</span></h3>
+  <div id="cableHelp" style="display:none">
+    <p>Läget <i>Auto</i> väljer en kabel som ger minst 100 W/m².<br>
+    Om underlaget är brännbart får det inte vara mer än 120 W/m².<br>
+    Förinställningarna gäller <a href="https://raychemgolvvarme.se/produkter/golvvarmesystem/golvvarmekablar/t2black">T2-Black</a>.</p>
+  </div>
+  <select id="cable" oninput="calculate()">
+    <option>Auto</option>  <!-- för syns skull när sidan laddas -->
+  </select>
+  
+  <div id="cableContainer" style="display:none">
+    <input id="customCable" type="number" min="1" step="0.5" required="true" size="4">
+    <label>m</label>
+    <input id="effect" type="number" min="1" required="true" size="4">
+    <label>W/m</label>
+  </div>
+    
+  <input id="combustable" type="checkbox">
+  <label>Brännbart underlag</label>
+
+  <h3>Längd och bredd <span style="color:darkcyan" onclick="show('measureHelp')">[?]</span></h3>
+  <div id="measureHelp" style="display:none">
+    <p>Dvs. rummets mått längs med slingorna &#215; tvärs över slingorna.</p>
+  </div>
+  <input id="length" type="number" required="true" min="1" size="4">
+  <span>&#215;</span>
+  <input id="width" name="width" type="number" required="true" min="1" size="4">
+  <label>cm</label>
+  <button onclick="rotate()">Växla</button>
+  <p></p>
+
+  <h4>Lägg till / ta bort yta <span style="color:darkcyan" onclick="show('advancedHelp')">[?]</span></h4>
+  <div id="advancedHelp" style="display:none">
+    <p>Skriv varje mått på en ny rad (cm*cm).<br>
+    <b>100*100</b> lägger till en kvadratmeter.<br>
+    <b>-50*100</b> tar bort en halv kvadratmeter.<br>
+    Ju större mått du skriver här desto osäkrare blir uträkningen.</p>
+  </div>
+  <textarea oninput="calculate()" id="advancedArea" cols="20" rows="3" style="color:red"></textarea>
+
+  <p>
+  <button onclick="reset()">Återställ</button>
+  <button id="measuresBtn" style="display:none" onclick="showResult()">Visa slingor</button>
+  <button id="overviewBtn" style="display:none" onclick="showResult()">Visa översikt</button>
+  </p>
+
+  <div id="overviewContainer" style="display:none">
+
+<svg
+   xmlns:dc="http://purl.org/dc/elements/1.1/"
+   xmlns:cc="http://creativecommons.org/ns#"
+   xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+   xmlns:svg="http://www.w3.org/2000/svg"
+   xmlns="http://www.w3.org/2000/svg"
+   width="70.482361mm"
+   height="76.826843mm"
+   viewBox="0 0 81.151373 87.258873"
+   version="1.1"
+   id="svg8">
+  <defs
+     id="defs2">
+    <marker
+       style="overflow:visible"
+       id="marker1191"
+       refX="0"
+       refY="0"
+       orient="auto">
+      <path
+         transform="scale(-0.6)"
+         d="M 8.7185878,4.0337352 -2.2072895,0.01601326 8.7185884,-4.0017078 c -1.7454984,2.3720609 -1.7354408,5.6174519 -6e-7,8.035443 z"
+         style="fill:#0000ff;fill-opacity:1;fill-rule:evenodd;stroke:#0000ff;stroke-width:0.625;stroke-linejoin:round;stroke-opacity:1"
+         id="path1189" />
+    </marker>
+    <marker
+       style="overflow:visible"
+       id="marker1181"
+       refX="0"
+       refY="0"
+       orient="auto">
+      <path
+         transform="scale(0.6)"
+         d="M 8.7185878,4.0337352 -2.2072895,0.01601326 8.7185884,-4.0017078 c -1.7454984,2.3720609 -1.7354408,5.6174519 -6e-7,8.035443 z"
+         style="fill:#0000ff;fill-opacity:1;fill-rule:evenodd;stroke:#0000ff;stroke-width:0.625;stroke-linejoin:round;stroke-opacity:1"
+         id="path1179" />
+    </marker>
+    <marker
+       style="overflow:visible"
+       id="marker1347"
+       refX="0"
+       refY="0"
+       orient="auto">
+      <path
+         transform="scale(-0.6)"
+         d="M 8.7185878,4.0337352 -2.2072895,0.01601326 8.7185884,-4.0017078 c -1.7454984,2.3720609 -1.7354408,5.6174519 -6e-7,8.035443 z"
+         style="fill:#4d4d4d;fill-opacity:1;fill-rule:evenodd;stroke:#4d4d4d;stroke-width:0.625;stroke-linejoin:round;stroke-opacity:1"
+         id="path1345" />
+    </marker>
+    <marker
+       style="overflow:visible"
+       id="marker1337"
+       refX="0"
+       refY="0"
+       orient="auto">
+      <path
+         transform="scale(0.6)"
+         d="M 8.7185878,4.0337352 -2.2072895,0.01601326 8.7185884,-4.0017078 c -1.7454984,2.3720609 -1.7354408,5.6174519 -6e-7,8.035443 z"
+         style="fill:#4d4d4d;fill-opacity:1;fill-rule:evenodd;stroke:#4d4d4d;stroke-width:0.625;stroke-linejoin:round;stroke-opacity:1"
+         id="path1335" />
+    </marker>
+    <marker
+       style="overflow:visible"
+       id="marker1125"
+       refX="0"
+       refY="0"
+       orient="auto">
+      <path
+         transform="scale(-0.6)"
+         d="M 8.7185878,4.0337352 -2.2072895,0.01601326 8.7185884,-4.0017078 c -1.7454984,2.3720609 -1.7354408,5.6174519 -6e-7,8.035443 z"
+         style="fill:#ff6600;fill-opacity:1;fill-rule:evenodd;stroke:#ff6600;stroke-width:0.625;stroke-linejoin:round;stroke-opacity:1"
+         id="path1123" />
+    </marker>
+    <marker
+       style="overflow:visible"
+       id="marker1115"
+       refX="0"
+       refY="0"
+       orient="auto">
+      <path
+         transform="scale(0.6)"
+         d="M 8.7185878,4.0337352 -2.2072895,0.01601326 8.7185884,-4.0017078 c -1.7454984,2.3720609 -1.7354408,5.6174519 -6e-7,8.035443 z"
+         style="fill:#ff6600;fill-opacity:1;fill-rule:evenodd;stroke:#ff6600;stroke-width:0.625;stroke-linejoin:round;stroke-opacity:1"
+         id="path1113" />
+    </marker>
+    <marker
+       style="overflow:visible"
+       id="marker3083"
+       refX="0"
+       refY="0"
+       orient="auto">
+      <path
+         transform="scale(-0.6)"
+         d="M 8.7185878,4.0337352 -2.2072895,0.01601326 8.7185884,-4.0017078 c -1.7454984,2.3720609 -1.7354408,5.6174519 -6e-7,8.035443 z"
+         style="fill:#0000ff;fill-opacity:1;fill-rule:evenodd;stroke:#0000ff;stroke-width:0.625;stroke-linejoin:round;stroke-opacity:1"
+         id="path3081" />
+    </marker>
+    <marker
+       style="overflow:visible"
+       id="marker3073"
+       refX="0"
+       refY="0"
+       orient="auto">
+      <path
+         transform="scale(0.6)"
+         d="M 8.7185878,4.0337352 -2.2072895,0.01601326 8.7185884,-4.0017078 c -1.7454984,2.3720609 -1.7354408,5.6174519 -6e-7,8.035443 z"
+         style="fill:#0000ff;fill-opacity:1;fill-rule:evenodd;stroke:#0000ff;stroke-width:0.625;stroke-linejoin:round;stroke-opacity:1"
+         id="path3071" />
+    </marker>
+    <marker
+       style="overflow:visible"
+       id="marker2859"
+       refX="0"
+       refY="0"
+       orient="auto">
+      <path
+         transform="scale(-0.6)"
+         d="M 8.7185878,4.0337352 -2.2072895,0.01601326 8.7185884,-4.0017078 c -1.7454984,2.3720609 -1.7354408,5.6174519 -6e-7,8.035443 z"
+         style="fill:#4d4d4d;fill-opacity:1;fill-rule:evenodd;stroke:#4d4d4d;stroke-width:0.625;stroke-linejoin:round;stroke-opacity:1"
+         id="path2857" />
+    </marker>
+    <marker
+       style="overflow:visible"
+       id="marker2849"
+       refX="0"
+       refY="0"
+       orient="auto">
+      <path
+         transform="scale(0.6)"
+         d="M 8.7185878,4.0337352 -2.2072895,0.01601326 8.7185884,-4.0017078 c -1.7454984,2.3720609 -1.7354408,5.6174519 -6e-7,8.035443 z"
+         style="fill:#4d4d4d;fill-opacity:1;fill-rule:evenodd;stroke:#4d4d4d;stroke-width:0.625;stroke-linejoin:round;stroke-opacity:1"
+         id="path2847" />
+    </marker>
+    <marker
+       style="overflow:visible"
+       id="Arrow2Mend"
+       refX="0"
+       refY="0"
+       orient="auto">
+      <path
+         transform="scale(-0.6)"
+         d="M 8.7185878,4.0337352 -2.2072895,0.01601326 8.7185884,-4.0017078 c -1.7454984,2.3720609 -1.7354408,5.6174519 -6e-7,8.035443 z"
+         style="fill:#0000ff;fill-opacity:1;fill-rule:evenodd;stroke:#0000ff;stroke-width:0.625;stroke-linejoin:round;stroke-opacity:1"
+         id="path882" />
+    </marker>
+    <marker
+       style="overflow:visible"
+       id="Arrow2Mstart"
+       refX="0"
+       refY="0"
+       orient="auto">
+      <path
+         transform="scale(0.6)"
+         d="M 8.7185878,4.0337352 -2.2072895,0.01601326 8.7185884,-4.0017078 c -1.7454984,2.3720609 -1.7354408,5.6174519 -6e-7,8.035443 z"
+         style="fill:#0000ff;fill-opacity:1;fill-rule:evenodd;stroke:#0000ff;stroke-width:0.625;stroke-linejoin:round;stroke-opacity:1"
+         id="path879" />
+    </marker>
+    <marker
+       style="overflow:visible"
+       id="marker1651"
+       refX="0"
+       refY="0"
+       orient="auto">
+      <path
+         transform="matrix(0.8,0,0,0.8,10,0)"
+         style="fill:#0000ff;fill-opacity:0.569871;fill-rule:evenodd;stroke:#0000ff;stroke-width:1pt;stroke-opacity:1"
+         d="M 0,0 5,-5 -12.5,0 5,5 Z"
+         id="path1649" />
+    </marker>
+    <marker
+       style="overflow:visible"
+       id="marker1599"
+       refX="0"
+       refY="0"
+       orient="auto">
+      <path
+         transform="matrix(0.8,0,0,0.8,10,0)"
+         style="fill:#0000ff;fill-opacity:0.569871;fill-rule:evenodd;stroke:#0000ff;stroke-width:1pt;stroke-opacity:1"
+         d="M 0,0 5,-5 -12.5,0 5,5 Z"
+         id="path1597" />
+    </marker>
+    <marker
+       style="overflow:visible"
+       id="Arrow1Lend"
+       refX="0"
+       refY="0"
+       orient="auto">
+      <path
+         transform="matrix(-0.8,0,0,-0.8,-10,0)"
+         style="fill:#0000ff;fill-opacity:0.569871;fill-rule:evenodd;stroke:#0000ff;stroke-width:1pt;stroke-opacity:1"
+         d="M 0,0 5,-5 -12.5,0 5,5 Z"
+         id="path858" />
+    </marker>
+    <marker
+       style="overflow:visible"
+       id="Arrow1Lstart"
+       refX="0"
+       refY="0"
+       orient="auto">
+      <path
+         transform="matrix(0.8,0,0,0.8,10,0)"
+         style="fill:#0000ff;fill-opacity:1;fill-rule:evenodd;stroke:#0000ff;stroke-width:1pt;stroke-opacity:1"
+         d="M 0,0 5,-5 -12.5,0 5,5 Z"
+         id="path855" />
+    </marker>
+  </defs>
+  <metadata
+     id="metadata5">
+    <rdf:RDF>
+      <cc:Work
+         rdf:about="">
+        <dc:format>image/svg+xml</dc:format>
+        <dc:type
+           rdf:resource="http://purl.org/dc/dcmitype/StillImage" />
+        <dc:title></dc:title>
+      </cc:Work>
+    </rdf:RDF>
+  </metadata>
+  <g
+     id="layer1"
+     transform="translate(-75.761765,-98.975501)">
+    <path
+       style="fill:none;fill-opacity:0.569871;fill-rule:evenodd;stroke:#0000ff;stroke-width:0.499999;stroke-linecap:round;stroke-linejoin:round;stroke-miterlimit:4;stroke-dasharray:0.499999, 0.999992;stroke-dashoffset:0;marker-mid:url(#Arrow1Lstart)"
+       d="M 85.462551,126.02447 H 135.96324"
+       id="path841" />
+    <path
+       style="fill:none;fill-opacity:0.569871;fill-rule:evenodd;stroke:#000000;stroke-width:0.999993;stroke-linecap:round;stroke-linejoin:round;stroke-miterlimit:4;stroke-dasharray:none;stroke-dashoffset:0"
+       d="M 77.632679,116.59767 H 142.74937"
+       id="path839" />
+    <path
+       style="fill:none;fill-opacity:0.569871;fill-rule:evenodd;stroke:#000000;stroke-width:1;stroke-linecap:round;stroke-linejoin:round;stroke-miterlimit:4;stroke-dasharray:none;stroke-dashoffset:1"
+       d="m 86.070345,167.46757 -0.0061,-34.92621 c 0,-6.80249 16.725085,-6.80249 16.725085,0 l 0.006,26.33651 c 0,12.67992 16.98829,12.77769 16.72507,0 v -21.19009 c -10e-6,-13.60492 16.72506,-13.60492 16.72506,0 v 11.55316"
+       id="path843" />
+    <g
+       id="g851"
+       style="stroke:#ff0000;stroke-width:0.0592904;stroke-miterlimit:4;stroke-dasharray:none"
+       transform="matrix(8.5217824,0,0,8.3453274,-362.42206,-958.74962)">
+      <path
+         style="fill:none;fill-opacity:0.569871;fill-rule:evenodd;stroke:#ff0000;stroke-width:0.0592904;stroke-linecap:round;stroke-linejoin:round;stroke-miterlimit:4;stroke-dasharray:none;stroke-dashoffset:3.77953"
+         d="m 53.181249,130.96875 0.79375,0.79375"
+         id="path845" />
+      <path
+         style="fill:#ff0000;fill-opacity:0.569871;fill-rule:evenodd;stroke:#ff0000;stroke-width:0.0592904;stroke-linecap:round;stroke-linejoin:round;stroke-miterlimit:4;stroke-dasharray:none;stroke-dashoffset:3.77953"
+         d="m 53.974999,130.96875 -0.79375,0.79375"
+         id="path847" />
+    </g>
+    <path
+       style="fill:none;fill-opacity:0.569871;fill-rule:evenodd;stroke:#008000;stroke-width:0.499999;stroke-linecap:round;stroke-linejoin:round;stroke-miterlimit:4;stroke-dasharray:none;stroke-dashoffset:3.77953"
+       d="m 124.54295,138.999 2.25472,2.20802 4.50945,-6.6241"
+       id="path853" />
+    <path
+       style="fill:#0000ff;fill-opacity:1;fill-rule:evenodd;stroke:#0000ff;stroke-width:0.3;stroke-linecap:round;stroke-linejoin:round;stroke-miterlimit:4;stroke-dasharray:none;stroke-dashoffset:3.77953;marker-start:url(#Arrow2Mstart);marker-end:url(#Arrow2Mend)"
+       d="m 127.65385,118.34849 v 6.2906"
+       id="path1551" />
+    <text
+       xml:space="preserve"
+       style="font-style:normal;font-variant:normal;font-weight:normal;font-stretch:normal;font-size:4.06178px;line-height:150%;font-family:sans-serif;-inkscape-font-specification:'sans-serif, Normal';font-variant-ligatures:normal;font-variant-caps:normal;font-variant-numeric:normal;font-variant-east-asian:normal;text-align:center;text-anchor:middle;fill:#0000ff;fill-opacity:1;fill-rule:evenodd;stroke:none;stroke-width:0.3;stroke-linecap:round;stroke-linejoin:round;stroke-miterlimit:4;stroke-dasharray:none;stroke-dashoffset:0"
+       x="111.57866"
+       y="122.44849"
+       id="text3811"
+       transform="scale(0.99838552,1.0016171)"><tspan
+         id="wallDistance"
+         x="111.57866"
+         y="122.44849"
+         style="font-style:normal;font-variant:normal;font-weight:normal;font-stretch:normal;font-size:4.06178px;font-family:sans-serif;-inkscape-font-specification:'sans-serif, Normal';font-variant-ligatures:normal;font-variant-caps:normal;font-variant-numeric:normal;font-variant-east-asian:normal;text-align:center;text-anchor:middle;fill:#0000ff;stroke:none;stroke-width:0.3">wall</tspan></text>
+    <path
+       style="fill:#ff6600;fill-opacity:1;fill-rule:evenodd;stroke:#ff6600;stroke-width:0.3;stroke-linecap:round;stroke-linejoin:round;stroke-miterlimit:4;stroke-dasharray:none;stroke-dashoffset:3.77953;marker-start:url(#marker1115);marker-end:url(#marker1125)"
+       d="M 116.5391,155.89615 H 105.68178"
+       id="path1111" />
+    <text
+       xml:space="preserve"
+       style="font-style:normal;font-variant:normal;font-weight:normal;font-stretch:normal;font-size:4.06178px;line-height:150%;font-family:sans-serif;-inkscape-font-specification:'sans-serif, Normal';font-variant-ligatures:normal;font-variant-caps:normal;font-variant-numeric:normal;font-variant-east-asian:normal;text-align:center;text-anchor:middle;fill:#ff6600;fill-opacity:1;fill-rule:evenodd;stroke:none;stroke-width:0.3;stroke-linecap:round;stroke-linejoin:round;stroke-miterlimit:4;stroke-dasharray:none;stroke-dashoffset:0"
+       x="111.16736"
+       y="152.66006"
+       id="text1279"
+       transform="scale(0.99838552,1.0016171)"><tspan
+         x="111.16736"
+         y="152.66006"
+         style="font-style:normal;font-variant:normal;font-weight:normal;font-stretch:normal;font-size:4.06178px;font-family:sans-serif;-inkscape-font-specification:'sans-serif, Normal';font-variant-ligatures:normal;font-variant-caps:normal;font-variant-numeric:normal;font-variant-east-asian:normal;fill:#ff6600;stroke:none;stroke-width:0.3"
+         id="gapWidth">line</tspan></text>
+    <path
+       style="fill:#4d4d4d;fill-opacity:1;fill-rule:evenodd;stroke:#4d4d4d;stroke-width:0.3;stroke-linecap:round;stroke-linejoin:round;stroke-miterlimit:4;stroke-dasharray:none;stroke-dashoffset:3.77953;marker-start:url(#marker1337);marker-end:url(#marker1347)"
+       d="m 136.1593,152.55204 v 10.85732"
+       id="path1333" />
+    <text
+       xml:space="preserve"
+       style="font-style:normal;font-variant:normal;font-weight:normal;font-stretch:normal;font-size:4.06178px;line-height:150%;font-family:sans-serif;-inkscape-font-specification:'sans-serif, Normal';font-variant-ligatures:normal;font-variant-caps:normal;font-variant-numeric:normal;font-variant-east-asian:normal;text-align:center;text-anchor:middle;fill:#4d4d4d;fill-opacity:1;fill-rule:evenodd;stroke:none;stroke-width:0.3;stroke-linecap:round;stroke-linejoin:round;stroke-miterlimit:4;stroke-dasharray:none;stroke-dashoffset:0"
+       x="138.59178"
+       y="158.55437"
+       id="text1557"
+       transform="scale(0.99838552,1.0016171)"><tspan
+         x="138.59178"
+         y="158.55437"
+         style="font-style:normal;font-variant:normal;font-weight:normal;font-stretch:normal;font-size:4.06178px;font-family:sans-serif;-inkscape-font-specification:'sans-serif, Normal';font-variant-ligatures:normal;font-variant-caps:normal;font-variant-numeric:normal;font-variant-east-asian:normal;text-align:start;text-anchor:start;fill:#4d4d4d;stroke:none;stroke-width:0.3"
+         id="cableReminder">missing</tspan></text>
+    <text
+       xml:space="preserve"
+       style="font-style:normal;font-variant:normal;font-weight:normal;font-stretch:normal;font-size:5.6865px;line-height:150%;font-family:sans-serif;-inkscape-font-specification:'sans-serif, Normal';font-variant-ligatures:normal;font-variant-caps:normal;font-variant-numeric:normal;font-variant-east-asian:normal;text-align:center;text-anchor:middle;fill:#000000;fill-opacity:1;fill-rule:evenodd;stroke:none;stroke-width:0.3;stroke-linecap:round;stroke-linejoin:round;stroke-miterlimit:4;stroke-dasharray:none;stroke-dashoffset:0"
+       x="127.77392"
+       y="108.00753"
+       id="text963"
+       transform="scale(0.99838552,1.0016171)"><tspan
+         id="outputEffect"
+         x="127.77392"
+         y="108.00753"
+         style="font-style:normal;font-variant:normal;font-weight:normal;font-stretch:normal;font-size:5.6865px;font-family:sans-serif;-inkscape-font-specification:'sans-serif, Normal';font-variant-ligatures:normal;font-variant-caps:normal;font-variant-numeric:normal;font-variant-east-asian:normal;text-align:center;text-anchor:middle;fill:#000000;stroke:none;stroke-width:0.3">effect</tspan></text>
+    <text
+       xml:space="preserve"
+       style="font-style:normal;font-variant:normal;font-weight:normal;font-stretch:normal;font-size:5.6865px;line-height:150%;font-family:sans-serif;-inkscape-font-specification:'sans-serif, Normal';font-variant-ligatures:normal;font-variant-caps:normal;font-variant-numeric:normal;font-variant-east-asian:normal;text-align:center;text-anchor:middle;fill:#000000;fill-opacity:1;fill-rule:evenodd;stroke:none;stroke-width:0.3;stroke-linecap:round;stroke-linejoin:round;stroke-miterlimit:4;stroke-dasharray:none;stroke-dashoffset:0"
+       x="94.365967"
+       y="108.00753"
+       id="text967"
+       transform="scale(0.99838552,1.0016171)"><tspan
+         id="totalArea"
+         x="94.365967"
+         y="108.00753"
+         style="font-style:normal;font-variant:normal;font-weight:normal;font-stretch:normal;font-size:5.6865px;font-family:sans-serif;-inkscape-font-specification:'sans-serif, Normal';font-variant-ligatures:normal;font-variant-caps:normal;font-variant-numeric:normal;font-variant-east-asian:normal;text-align:center;text-anchor:middle;fill:#000000;stroke:none;stroke-width:0.3">area</tspan></text>
+    <text
+       xml:space="preserve"
+       style="font-style:normal;font-variant:normal;font-weight:normal;font-stretch:normal;font-size:4.06178px;line-height:150%;font-family:sans-serif;-inkscape-font-specification:'sans-serif, Normal';font-variant-ligatures:normal;font-variant-caps:normal;font-variant-numeric:normal;font-variant-east-asian:normal;text-align:end;text-anchor:end;fill:#000000;fill-opacity:1;fill-rule:evenodd;stroke:none;stroke-width:0.3;stroke-linecap:round;stroke-linejoin:round;stroke-miterlimit:4;stroke-dasharray:none;stroke-dashoffset:0"
+       x="94.209587"
+       y="113.63314"
+       id="text971"
+       transform="scale(0.99838552,1.0016171)"><tspan
+         id="usableArea"
+         x="94.209587"
+         y="113.63314"
+         style="font-style:normal;font-variant:normal;font-weight:normal;font-stretch:normal;font-size:4.06178px;font-family:sans-serif;-inkscape-font-specification:'sans-serif, Normal';font-variant-ligatures:normal;font-variant-caps:normal;font-variant-numeric:normal;font-variant-east-asian:normal;text-align:center;text-anchor:middle;fill:#000000;stroke:none;stroke-width:0.3">usable</tspan></text>
+    <path
+       style="fill:#0000ff;fill-opacity:1;fill-rule:evenodd;stroke:#0000ff;stroke-width:0.3;stroke-linecap:round;stroke-linejoin:round;stroke-miterlimit:4;stroke-dasharray:none;stroke-dashoffset:3.77953;marker-start:url(#marker1181);marker-end:url(#marker1191)"
+       d="m 93.955227,118.34849 v 6.2906"
+       id="path1177" />
+    <text
+       xml:space="preserve"
+       style="font-style:normal;font-variant:normal;font-weight:normal;font-stretch:normal;font-size:4.06178px;line-height:150%;font-family:sans-serif;-inkscape-font-specification:'sans-serif, Normal';font-variant-ligatures:normal;font-variant-caps:normal;font-variant-numeric:normal;font-variant-east-asian:normal;text-align:center;text-anchor:middle;fill:#ff0000;fill-opacity:1;fill-rule:evenodd;stroke:none;stroke-width:0.3;stroke-linecap:round;stroke-linejoin:round;stroke-miterlimit:4;stroke-dasharray:none;stroke-dashoffset:0"
+       x="127.96192"
+       y="101.74822"
+       id="text985"
+       transform="scale(0.99838552,1.0016171)"><tspan
+         id="effectWarning"
+         x="127.96194"
+         y="101.74822"
+         style="font-style:normal;font-variant:normal;font-weight:normal;font-stretch:normal;font-size:4.06178px;font-family:sans-serif;-inkscape-font-specification:'sans-serif, Normal';font-variant-ligatures:normal;font-variant-caps:normal;font-variant-numeric:normal;font-variant-east-asian:normal;text-align:center;text-anchor:middle;fill:#ff0000;stroke:none;stroke-width:0.3">warning</tspan></text>
+    <text
+       xml:space="preserve"
+       style="font-style:normal;font-variant:normal;font-weight:normal;font-stretch:normal;font-size:4.06178px;line-height:150%;font-family:sans-serif;-inkscape-font-specification:'sans-serif, Normal';font-variant-ligatures:normal;font-variant-caps:normal;font-variant-numeric:normal;font-variant-east-asian:normal;text-align:center;text-anchor:middle;fill:#000000;fill-opacity:1;fill-rule:evenodd;stroke:none;stroke-width:0.3;stroke-linecap:round;stroke-linejoin:round;stroke-miterlimit:4;stroke-dasharray:none;stroke-dashoffset:0"
+       x="111.13462"
+       y="173.86043"
+       id="text999"
+       transform="scale(0.99838552,1.0016171)"><tspan
+         id="lineCount"
+         x="111.13462"
+         y="173.86043">count</tspan></text>
+    <text
+       xml:space="preserve"
+       style="font-style:normal;font-variant:normal;font-weight:normal;font-stretch:normal;font-size:4.06178px;line-height:150%;font-family:sans-serif;-inkscape-font-specification:'sans-serif, Normal';font-variant-ligatures:normal;font-variant-caps:normal;font-variant-numeric:normal;font-variant-east-asian:normal;text-align:end;text-anchor:end;fill:#000000;fill-opacity:1;fill-rule:evenodd;stroke:none;stroke-width:0.3;stroke-linecap:round;stroke-linejoin:round;stroke-miterlimit:4;stroke-dasharray:none;stroke-dashoffset:0"
+       x="127.79832"
+       y="113.63314"
+       id="text989"
+       transform="scale(0.99838552,1.0016171)"><tspan
+         id="selectedCable"
+         x="127.79832"
+         y="113.63314"
+         style="font-style:normal;font-variant:normal;font-weight:normal;font-stretch:normal;font-size:4.06178px;font-family:sans-serif;-inkscape-font-specification:'sans-serif, Normal';font-variant-ligatures:normal;font-variant-caps:normal;font-variant-numeric:normal;font-variant-east-asian:normal;text-align:center;text-anchor:middle;fill:#000000;stroke:none;stroke-width:0.3">cable</tspan></text>
+  </g>
+</svg>
+
+  </div>
+
+  <div id="measuresContainer" style="font-size:8mm;text-indent:5mm;display:none">
+    <p>Avstånd från vägg för varje slinga:</p>
+    <div id="measures"></div>
+  </div>
+    
+  </div>
+</body>
+</html>
